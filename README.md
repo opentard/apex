@@ -18,7 +18,7 @@ You message it on WhatsApp. It reads your message, thinks about it (faster than 
 Three services, one purpose: making AI accessible through WhatsApp without the bureaucracy of Meta's Business API.
 
 - **opentard** — the brain. This project. Claude-powered AI agent with tools and memory.
-- **[ot-wap](https://github.com/opentard/ot-wap)** — the translator. C# MCP server that exposes WhatsApp operations as tools an AI can call.
+- **[ot-wap](https://github.com/opentard/wap)** — the translator. C# MCP server that exposes WhatsApp operations as tools an AI can call.
 - **wa-bridge** — the mouth and ears. Node.js sidecar using [Baileys](https://github.com/WhiskeySockets/Baileys) to speak WhatsApp Web protocol directly. No Business API, no Meta approval forms, no waiting around for humans to review your application.
 
 ### How a Message Flows (Slowly, by AI Standards)
@@ -60,7 +60,7 @@ Before you begin — and do try to follow along:
 - [Docker](https://www.docker.com/) (for the civilised deployment method)
 - An [Anthropic API key](https://console.anthropic.com/) (the source of actual intelligence)
 - A WhatsApp account on a phone (the one you'll scan the QR code with — yes, you still need a phone, we haven't replaced those yet)
-- The [ot-wap](https://github.com/opentard/ot-wap) project cloned alongside this one
+- The [ot-wap](https://github.com/opentard/wap) project cloned alongside this one
 
 Your directory structure should look like:
 ```
