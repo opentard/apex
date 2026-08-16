@@ -37,5 +37,9 @@ bld/
 .claude/settings.local.json
 
 ## Data
+# Root-anchored for the compose volume, and unanchored so a local `dotnet run` — whose working
+# directory is src/Tard, not the repo root — cannot leave persisted memories or chat transcripts
+# sitting untracked and one `git add -A` away from being published.
 /data/
+data/
 
