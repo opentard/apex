@@ -74,8 +74,11 @@ public class JsonFileMemoryStore : IMemoryStore
 
     private string GetFilePath(string userId)
     {
-        // Sanitize userId for filename safety
+        // Sanitize userId for filename safety. Stripping separators means two ids that differ only
+        // by punctuation share a file, which is acceptable for phone numbers and "web:{chatId}".
         var safe = string.Concat(userId.Where(c => char.IsLetterOrDigit(c) || c == '+' || c == '_'));
+        if (safe.Length == 0)
+            safe = "unknown";
         return Path.Combine(_basePath, $"{safe}.json");
     }
 
@@ -86,14 +89,28 @@ public class JsonFileMemoryStore : IMemoryStore
             return new Dictionary<string, string>();
 
         var json = await File.ReadAllTextAsync(path, cancellationToken);
-        return JsonSerializer.Deserialize<Dictionary<string, string>>(json)
-            ?? new Dictionary<string, string>();
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(json)
+                ?? new Dictionary<string, string>();
+        }
+        catch (JsonException ex)
+        {
+            // A truncated or hand-edited file would otherwise throw on every future memory call,
+            // permanently breaking this user's agent. Start fresh instead, keeping the bad file.
+            _logger.LogError(ex, "Memory file {Path} is not valid JSON; ignoring it", path);
+            return new Dictionary<string, string>();
+        }
     }
 
     private async Task SaveUserDataAsync(string userId, Dictionary<string, string> data, CancellationToken cancellationToken)
     {
         var path = GetFilePath(userId);
         var json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
-        await File.WriteAllTextAsync(path, json, cancellationToken);
+
+        // Write-then-replace so a crash mid-write cannot leave a half-written memory file behind.
+        var tempPath = path + ".tmp";
+        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
+        File.Move(tempPath, path, overwrite: true);
     }
 }

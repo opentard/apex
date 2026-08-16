@@ -9,6 +9,17 @@ namespace Tard.Messaging;
 
 public class OtWapGateway : IMessageGateway, IAsyncDisposable
 {
+    /// <summary>
+    /// ot-wap serializes its tool payloads with an anonymous wrapper (camelCase "count"/"messages")
+    /// around PascalCase StoredMessage bodies. System.Text.Json is case-sensitive by default, so a
+    /// strict reader silently binds Messages to null and the agent sees no traffic at all.
+    /// Parse case-insensitively so the gateway tolerates either casing on either level.
+    /// </summary>
+    private static readonly JsonSerializerOptions McpJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
+
     private readonly TardOptions _options;
     private readonly ILogger<OtWapGateway> _logger;
     private IMcpClient? _client;
@@ -32,10 +43,15 @@ public class OtWapGateway : IMessageGateway, IAsyncDisposable
                 return _client;
 
             _logger.LogInformation("Connecting MCP client to {Url}", _options.OtWapUrl);
+
+            // ot-wap's MapMcp("/mcp") serves Streamable HTTP on POST /mcp and only exposes the
+            // legacy SSE stream at /mcp/sse. Left in legacy mode the client issues GET /mcp, gets
+            // a 404, and every poll fails — so ask for Streamable HTTP explicitly.
             _client = await McpClientFactory.CreateAsync(
                 new SseClientTransport(new SseClientTransportOptions
                 {
-                    Endpoint = new Uri($"{_options.OtWapUrl}/mcp"),
+                    Endpoint = new Uri($"{_options.OtWapUrl.TrimEnd('/')}/mcp"),
+                    UseStreamableHttp = true,
                     Name = "tard-agent"
                 }),
                 cancellationToken: cancellationToken);
@@ -60,24 +76,7 @@ public class OtWapGateway : IMessageGateway, IAsyncDisposable
             var result = await client.CallToolAsync("ReceiveAllMessages", args, cancellationToken: cancellationToken);
 
             var text = result.Content.FirstOrDefault(c => c.Type == "text")?.Text;
-            if (string.IsNullOrEmpty(text))
-                return Array.Empty<ChatMessage>();
-
-            var parsed = JsonSerializer.Deserialize<McpMessagesResponse>(text);
-            if (parsed?.Messages is null)
-                return Array.Empty<ChatMessage>();
-
-            return parsed.Messages.Select(m => new ChatMessage
-            {
-                MessageId = m.MessageId,
-                FromPhoneNumber = m.FromPhoneNumber,
-                SenderName = m.SenderName ?? "Unknown",
-                MessageType = m.MessageType,
-                TextBody = m.TextBody,
-                MediaId = m.MediaId,
-                GroupId = m.GroupId,
-                ReceivedAt = m.ReceivedAt
-            }).ToList();
+            return ParseMessagesPayload(text);
         }
         catch (Exception ex)
         {
@@ -127,6 +126,36 @@ public class OtWapGateway : IMessageGateway, IAsyncDisposable
     {
         await DisposeClientAsync();
         _initLock.Dispose();
+    }
+
+    /// <summary>
+    /// Turns the JSON body of ot-wap's ReceiveAllMessages tool into chat messages.
+    /// Split out from the transport so the wire contract between the two services is unit-testable
+    /// — this is exactly where a silent casing mismatch stopped every inbound message.
+    /// </summary>
+    internal static IReadOnlyList<ChatMessage> ParseMessagesPayload(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return Array.Empty<ChatMessage>();
+
+        var parsed = JsonSerializer.Deserialize<McpMessagesResponse>(text, McpJsonOptions);
+        if (parsed?.Messages is null)
+            return Array.Empty<ChatMessage>();
+
+        return parsed.Messages
+            .Where(m => !string.IsNullOrEmpty(m.MessageId))
+            .Select(m => new ChatMessage
+            {
+                MessageId = m.MessageId,
+                FromPhoneNumber = m.FromPhoneNumber,
+                SenderName = m.SenderName ?? "Unknown",
+                MessageType = m.MessageType,
+                TextBody = m.TextBody,
+                MediaId = m.MediaId,
+                GroupId = m.GroupId,
+                ReceivedAt = m.ReceivedAt
+            })
+            .ToList();
     }
 
     // DTOs for parsing MCP tool responses

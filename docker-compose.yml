@@ -1,14 +1,28 @@
-version: "3.8"
+# Brings up the whole stack: WhatsApp bridge -> ot-wap MCP server -> tard agent.
+#
+# The wa-bridge and ot-wap services are built from the sibling `wap` repo by relative path, so
+# https://github.com/opentard/wap must be cloned next to this one (../wap) or the build fails with
+# "failed to read dockerfile".
+#
+# This is the full-stack entry point. The wap repo ships its own compose file for running ot-wap
+# standalone — run one or the other, not both. They are separate compose projects with separate
+# volumes, so each maintains its own independent WhatsApp session (two QR scans, two linked
+# devices), and by default both want host port 8080. Override the ports below if you want both up.
+name: opentard
+
 services:
   wa-bridge:
     build:
-      context: ../ot-wap/sidecar
+      context: ../wap/sidecar
       dockerfile: Dockerfile
-    ports:
-      - "3001:3001"
+    # Not published to the host: none of the bridge's endpoints are authenticated, so exposing it
+    # would let anyone on the network read the pairing QR, force a logout, or send messages as you.
+    expose:
+      - "3001"
     environment:
       - PORT=3001
       - WEBHOOK_URL=http://ot-wap:8080
+      - WEBHOOK_TOKEN=${WAP_WEBHOOK_TOKEN:-}
     volumes:
       - wa-auth-state:/app/auth_state
       - wa-media-cache:/app/media_cache
@@ -16,12 +30,14 @@ services:
 
   ot-wap:
     build:
-      context: ../ot-wap
+      context: ../wap
       dockerfile: Dockerfile
+    # Loopback only — the MCP endpoint has no authentication of its own.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:${OT_WAP_PORT:-8080}:8080"
     environment:
       - WHATSAPP__BRIDGEURL=http://wa-bridge:3001
+      - WHATSAPP__WEBHOOKVERIFYTOKEN=${WAP_WEBHOOK_TOKEN:-}
     depends_on:
       - wa-bridge
     restart: unless-stopped
@@ -32,14 +48,30 @@ services:
       dockerfile: Dockerfile
     depends_on:
       - ot-wap
+    # Loopback only — the dashboard has no login, and it drives an agent with tool access.
+    ports:
+      - "127.0.0.1:${TARD_PORT:-5000}:5000"
     environment:
       - TARD__OTWAPURL=http://ot-wap:8080
+      # An Anthropic API key (sk-ant-api…) is required. A logged-in Claude session stores an OAuth
+      # token, which this client cannot use — see spec.md → Credentials.
       - TARD__ANTHROPICAPIKEY=${ANTHROPIC_API_KEY}
-      - TARD__ANTHROPICMODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}
+      - TARD__ANTHROPICMODEL=${ANTHROPIC_MODEL:-claude-sonnet-5}
       - TARD__POLLINGINTERVALMS=3000
       - TARD__MEMORYSTOREPATH=/data/memory
+      # Comma-separated E.164 allowlist. Empty means every WhatsApp sender may drive the agent.
+      - TARD__ALLOWEDSENDERS=${TARD_ALLOWED_SENDERS:-}
+      # ShellSkill runs arbitrary commands inside this container. Off unless you opt in.
+      - TARD__ENABLESHELLSKILL=${TARD_ENABLE_SHELL:-false}
     volumes:
       - tard-memory:/data/memory
+      # Uncomment to let the agent read an API key from a host Claude config instead of the env
+      # var. The container runs as the non-root app user (uid 1654, home /home/app), so the mount
+      # must land there — /root is neither the resolved home nor readable by that uid.
+      # Note this only helps if the file holds an sk-ant-api… key; an OAuth session token is
+      # skipped, because the API rejects it on the x-api-key header. Exposing host credentials to
+      # the container is a real trust decision — keep TARD__ENABLESHELLSKILL=false if you do it.
+      # - ${HOME}/.claude/.credentials.json:/home/app/.claude/.credentials.json:ro
     restart: unless-stopped
 
 volumes:

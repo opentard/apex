@@ -31,6 +31,7 @@ public class ClaudeAiClient : IAiClient
         var request = new ClaudeRequest
         {
             Model = _options.AnthropicModel,
+            MaxTokens = _options.MaxTokens,
             System = systemPrompt,
             Messages = claudeMessages,
             Tools = tools?.Select(t => new ClaudeTool
@@ -42,7 +43,16 @@ public class ClaudeAiClient : IAiClient
         };
 
         var response = await _httpClient.PostAsJsonAsync("v1/messages", request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            // EnsureSuccessStatusCode() drops the body, which is where the Anthropic API explains
+            // what it actually rejected (bad model name, malformed tool_result, expired key...).
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            _logger.LogError("Claude API returned {Status}: {Body}", (int)response.StatusCode, body);
+            throw new HttpRequestException(
+                $"Claude API returned {(int)response.StatusCode} {response.ReasonPhrase}: {body}",
+                null, response.StatusCode);
+        }
 
         var claudeResponse = await response.Content.ReadFromJsonAsync<ClaudeResponse>(cancellationToken: cancellationToken);
         if (claudeResponse is null)

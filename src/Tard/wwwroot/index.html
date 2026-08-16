@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>opentard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+    --bg: #0a0a0a; --surface: #141414; --border: #2a2a2a;
+    --text: #e0e0e0; --text-dim: #888; --accent: #6c63ff; --accent-hover: #5a52d5;
+    --user-bg: #1a1a2e; --assistant-bg: #1a1a1a;
+}
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; }
+
+/* Sidebar */
+.sidebar { width: 280px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; flex-shrink: 0; }
+.sidebar-header { padding: 16px; border-bottom: 1px solid var(--border); }
+.sidebar-header h1 { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+.btn-new { width: 100%; padding: 10px; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; }
+.btn-new:hover { background: var(--accent-hover); }
+.chat-list { flex: 1; overflow-y: auto; padding: 8px; }
+.chat-item { padding: 10px 12px; border-radius: 6px; cursor: pointer; margin-bottom: 2px; display: flex; justify-content: space-between; align-items: center; }
+.chat-item:hover { background: var(--border); }
+.chat-item.active { background: var(--accent); color: #fff; }
+.chat-item-info { flex: 1; min-width: 0; }
+.chat-item-title { font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-item-date { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.chat-item.active .chat-item-date { color: rgba(255,255,255,0.7); }
+.chat-item-delete { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; padding: 2px 6px; border-radius: 4px; visibility: hidden; }
+.chat-item:hover .chat-item-delete { visibility: visible; }
+.chat-item-delete:hover { background: rgba(255,0,0,0.2); color: #f66; }
+
+/* Main area */
+.main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.banner { display: none; padding: 10px 24px; background: #3a1a1a; border-bottom: 1px solid #5a2a2a; color: #ffb4b4; font-size: 13px; }
+.messages { flex: 1; overflow-y: auto; padding: 24px; }
+.empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-dim); font-size: 15px; }
+.message { max-width: 720px; margin: 0 auto 16px; padding: 12px 16px; border-radius: 8px; line-height: 1.6; font-size: 14px; white-space: pre-wrap; word-wrap: break-word; }
+.message.user { background: var(--user-bg); border: 1px solid #2a2a4e; }
+.message.assistant { background: var(--assistant-bg); border: 1px solid var(--border); }
+.message .role { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+.message.user .role { color: var(--accent); }
+.typing { max-width: 720px; margin: 0 auto 16px; padding: 12px 16px; color: var(--text-dim); font-size: 14px; display: none; }
+
+/* Input */
+.input-area { padding: 16px 24px; border-top: 1px solid var(--border); background: var(--surface); }
+.input-row { max-width: 720px; margin: 0 auto; display: flex; gap: 8px; }
+.input-row textarea { flex: 1; padding: 10px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 14px; font-family: inherit; resize: none; min-height: 44px; max-height: 160px; }
+.input-row textarea:focus { outline: none; border-color: var(--accent); }
+.btn-send { padding: 10px 20px; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; }
+.btn-send:hover { background: var(--accent-hover); }
+.btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+    <div class="sidebar-header">
+        <h1>opentard</h1>
+        <button class="btn-new" onclick="newChat()">New Chat</button>
+    </div>
+    <div class="chat-list" id="chatList"></div>
+</div>
+
+<div class="main">
+    <div class="banner" id="banner" role="alert"></div>
+    <div class="messages" id="messages">
+        <div class="empty-state" id="emptyState">Start a new chat or select one from the sidebar.</div>
+    </div>
+    <div class="typing" id="typing">Thinking...</div>
+    <div class="input-area">
+        <div class="input-row">
+            <textarea id="input" placeholder="Type a message..." rows="1" onkeydown="handleKey(event)" disabled></textarea>
+            <button class="btn-send" id="sendBtn" onclick="send()" disabled>Send</button>
+        </div>
+    </div>
+</div>
+
+<script>
+let currentChatId = null;
+let sending = false;
+let chatSummaries = [];
+
+const el = {
+    list: document.getElementById('chatList'),
+    messages: document.getElementById('messages'),
+    empty: document.getElementById('emptyState'),
+    typing: document.getElementById('typing'),
+    input: document.getElementById('input'),
+    send: document.getElementById('sendBtn'),
+    banner: document.getElementById('banner')
+};
+
+// A multi-round tool loop can legitimately run for minutes, so the send timeout is generous while
+// list/open calls stay snappy.
+const QUICK_TIMEOUT_MS = 15000;
+const SEND_TIMEOUT_MS = 300000;
+
+async function api(path, opts, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs || QUICK_TIMEOUT_MS);
+    try {
+        const res = await fetch('/api/chats' + path, {
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            ...opts
+        });
+        if (res.status === 404) return null;
+        const text = await res.text();
+        const body = text ? safeJson(text) : null;
+        if (!res.ok) {
+            throw new Error((body && body.error) || `Request failed (${res.status})`);
+        }
+        return body;
+    } catch (err) {
+        if (err.name === 'AbortError') throw new Error('The request timed out.');
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function safeJson(text) {
+    try { return JSON.parse(text); } catch { return null; }
+}
+
+function showError(message) {
+    el.banner.textContent = message;
+    el.banner.style.display = 'block';
+}
+
+function clearError() {
+    el.banner.style.display = 'none';
+}
+
+async function loadChats() {
+    // Without this guard a failed listing left `chats` undefined and the whole page died silently.
+    let chats;
+    try {
+        chats = await api('');
+        clearError();
+    } catch (err) {
+        showError('Could not load chats: ' + err.message);
+        return;
+    }
+
+    chatSummaries = chats || [];
+    el.list.innerHTML = '';
+    for (const c of chatSummaries) {
+        const item = document.createElement('div');
+        item.className = 'chat-item' + (c.id === currentChatId ? ' active' : '');
+
+        const info = document.createElement('div');
+        info.className = 'chat-item-info';
+        info.onclick = () => openChat(c.id);
+
+        const title = document.createElement('div');
+        title.className = 'chat-item-title';
+        title.textContent = c.title || 'New Chat';
+
+        const date = document.createElement('div');
+        date.className = 'chat-item-date';
+        date.textContent = `${fmtDate(c.lastMessageAt)} · ${c.messageCount} msgs`;
+
+        info.append(title, date);
+
+        const del = document.createElement('button');
+        del.className = 'chat-item-delete';
+        del.title = 'Delete chat';
+        del.setAttribute('aria-label', 'Delete chat');
+        del.textContent = '×';
+        del.onclick = (e) => deleteChat(e, c.id);
+
+        item.append(info, del);
+        el.list.appendChild(item);
+    }
+}
+
+async function newChat() {
+    // Reuse an untouched chat rather than stacking up empty "New Chat" rows.
+    const spare = chatSummaries.find(c => c.messageCount === 0);
+    if (spare) return openChat(spare.id);
+
+    try {
+        const chat = await api('', { method: 'POST' });
+        if (!chat) return;
+        currentChatId = chat.id;
+        clearError();
+        await loadChats();
+        renderMessages([]);
+        enableInput(true);
+    } catch (err) {
+        showError('Could not start a new chat: ' + err.message);
+    }
+}
+
+async function openChat(id) {
+    try {
+        const chat = await api('/' + id);
+        if (!chat) {
+            showError('That chat no longer exists.');
+            await loadChats();
+            return;
+        }
+        currentChatId = id;
+        clearError();
+        await loadChats();
+        renderMessages(chat.messages || []);
+        enableInput(true);
+    } catch (err) {
+        showError('Could not open that chat: ' + err.message);
+    }
+}
+
+async function deleteChat(e, id) {
+    e.stopPropagation();
+    try {
+        await api('/' + id, { method: 'DELETE' });
+        clearError();
+    } catch (err) {
+        showError('Could not delete that chat: ' + err.message);
+        return;
+    }
+
+    if (currentChatId === id) {
+        currentChatId = null;
+        renderMessages([]);
+        enableInput(false);
+    }
+    await loadChats();
+}
+
+async function send() {
+    const text = el.input.value.trim();
+    if (!text || !currentChatId || sending) return;
+
+    sending = true;
+    el.input.value = '';
+    el.input.style.height = 'auto';
+    el.send.disabled = true;
+
+    appendMessage('user', text);
+    el.typing.style.display = 'block';
+    scrollBottom();
+
+    try {
+        const res = await api('/' + currentChatId + '/messages', {
+            method: 'POST',
+            body: JSON.stringify({ text })
+        }, SEND_TIMEOUT_MS);
+
+        if (res) {
+            appendMessage('assistant', res.reply);
+            clearError();
+        } else {
+            showError('That chat no longer exists.');
+        }
+        await loadChats();
+    } catch (err) {
+        // The message was already echoed into the transcript, so say plainly that it did not land.
+        showError('Message not delivered: ' + err.message);
+    } finally {
+        el.typing.style.display = 'none';
+        sending = false;
+        el.send.disabled = false;
+        el.input.focus();
+        scrollBottom();
+    }
+}
+
+function renderMessages(msgs) {
+    // Remove only the message nodes. Wiping innerHTML used to delete #emptyState from the DOM, so
+    // the next appendMessage() dereferenced null and reopening any non-empty chat rendered nothing.
+    for (const node of Array.from(el.messages.children)) {
+        if (node !== el.empty) node.remove();
+    }
+
+    el.empty.style.display = msgs.length === 0 ? 'flex' : 'none';
+    for (const m of msgs) appendMessage(m.role, m.text);
+    scrollBottom();
+}
+
+function appendMessage(role, text) {
+    el.empty.style.display = 'none';
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'message ' + (role === 'user' ? 'user' : 'assistant');
+
+    const label = document.createElement('div');
+    label.className = 'role';
+    label.textContent = role;
+
+    const body = document.createElement('div');
+    body.textContent = text == null ? '' : String(text);
+
+    wrapper.append(label, body);
+    el.messages.appendChild(wrapper);
+    scrollBottom();
+}
+
+function enableInput(on) {
+    el.input.disabled = !on;
+    el.send.disabled = !on;
+    if (on) el.input.focus();
+}
+
+function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+    const t = e.target;
+    setTimeout(() => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; }, 0);
+}
+
+function scrollBottom() {
+    el.messages.scrollTop = el.messages.scrollHeight;
+}
+
+function fmtDate(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) {
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+loadChats();
+</script>
+</body>
+</html>

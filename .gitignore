@@ -33,5 +33,9 @@ bld/
 ## Environment
 .env
 
+## Claude Code local settings (machine-specific, should not be shared)
+.claude/settings.local.json
+
 ## Data
 /data/
+
